@@ -8,11 +8,22 @@
 #include <nanosvg.h>
 
 #define TRAIL_POINT_COUNT 1000
+#define DRAW_TIME 20
 #define VECTOR_SCALE 1
-#define COEFFICIENTS 500
+#define COEFFICIENTS 250
+
+#define TRANS_GRAY ((Color){ 0xD3, 0xD3, 0xDE, 90 })
 
 void DrawVector(Vector2 vec, Vector2 origin, float width) {
-    DrawLineEx(origin, Vector2Add(origin, vec), width, (Color){ 207, 159, 255, 255 });
+    float length = Vector2Length(vec);
+    float tip_length = length * 0.1;
+    vec = Vector2Scale(vec, 0.9);
+    Vector2 tip = Vector2Scale(Vector2Normalize(vec), tip_length);
+    Vector2 v1 = Vector2Add(Vector2Add(vec, tip), origin);
+    Vector2 v2 = Vector2Add(Vector2Add(vec, Vector2Rotate(tip, -2.472)), origin);
+    Vector2 v3 = Vector2Add(Vector2Add(vec, Vector2Rotate(tip, 2.472)), origin);
+    DrawLineEx(origin, Vector2Add(origin, vec), width, WHITE);
+    DrawTriangle(v1, v2, v3, WHITE);
 }
 
 float lerp(float a, float b, float t) {
@@ -22,8 +33,12 @@ float lerp(float a, float b, float t) {
 // only defined between 0 and 2
 float *path;
 int npts;
+int width;
+int height;
+float scale_factor;
+float x_offset;
+float y_offset;
 complex f(float x) {
-    // return cos(2*PI*x) + I * sin(2*PI*x);
     float n = (npts - 1) * x / 3;
     float t = n - (int)n;
     int i = (int)n * 6;
@@ -53,25 +68,57 @@ complex f(float x) {
     float xr1 = lerp(xq1, xq2, t);
     float yr1 = lerp(yq1, yq2, t);
 
-    float real = lerp(xr0, xr1, t) - 800;
-    float imag = lerp(yr0, yr1, t) - 450;
+    float real = lerp(xr0, xr1, t) * scale_factor - 800 + x_offset;
+    float imag = lerp(yr0, yr1, t) * scale_factor - 450 + y_offset;
 
     return real + I*imag;
 }
 
-int main() {
+int main(int argc, char **argv) {
     InitWindow(1600, 900, "Fourier Series Visualization");
 
-    NSVGimage *fourier_svg = nsvgParseFromFile("fourier.svg", "px", 1);
-    path = fourier_svg->shapes[0].paths[0].pts;
-    npts = fourier_svg->shapes[0].paths[0].npts;
+    NSVGimage *svg;
+    if (argc > 1) {
+        svg = nsvgParseFromFile(argv[1], "px", 1);
+    } else {
+        svg = nsvgParseFromFile("fourier.svg", "px", 1);
+    }
+
+    width = svg->width;
+    height = svg->height;
+    if (width/1600.f > height/900.f) {
+        scale_factor = 1600.f / width * 0.9f;
+    } else {
+        scale_factor = 900.f / height * 0.9f;
+    }
+    x_offset = (1600 - scale_factor * width) / 2;
+    y_offset = (900 - scale_factor * height) / 2;
+
+    NSVGpath *paths = svg->shapes->paths;
+    npts = 0;
+    while (paths != NULL) {
+        npts += paths->npts;
+        paths = paths->next;
+    }
+    int j = 0;
+    path = (float *)malloc(sizeof(float) * npts * 2);
+
+    paths = svg->shapes->paths;
+    while (paths != NULL) {
+        for (int i = 0; i < paths->npts * 2; i++) {
+            path[j] = paths->pts[i]; 
+            j++;
+        }
+        paths = paths->next;
+    }
+
     Vector2 *points = (Vector2 *)malloc(sizeof(Vector2) * npts);
     for (int i = 0; i < npts * 2 - 1; i+=2) {
         points[i/2].x = path[i];
         points[i/2].y = path[i+1];
     }
 
-    complex coefficients[COEFFICIENTS * 2];
+    complex coefficients[COEFFICIENTS * 2 + 1];
     int a = 0;
     int b = 1;
     int n = 10000;
@@ -93,16 +140,39 @@ int main() {
         coefficients[i + COEFFICIENTS] = real  - I*comp;
     }
 
-    for (int i = 0; i < COEFFICIENTS * 2; i++) {
+    for (int i = 0; i < COEFFICIENTS * 2 + 1; i++) {
         printf("k%d: %f %fi\n", i - COEFFICIENTS, creal(coefficients[i]), cimag(coefficients[i]));
     }
 
     Vector2 origin = { 800, 450 };
 
+    // Calculate initial point
+    Vector2 initial_origin = origin;
+    complex phasor = coefficients[COEFFICIENTS];
+    float x = creal(phasor) * VECTOR_SCALE;
+    float y = cimag(phasor) * VECTOR_SCALE;
+    Vector2 vec = { x, y };
+    initial_origin = Vector2Add(vec, initial_origin);
+
+    for (int k = 1; k <= COEFFICIENTS; k++) {
+        int i_positive = k + COEFFICIENTS;
+        int i_negative = -k + COEFFICIENTS;
+        phasor = coefficients[i_positive];
+        x = creal(phasor) * VECTOR_SCALE;
+        y = cimag(phasor) * VECTOR_SCALE;
+        Vector2 vec1 = { x, y };
+        initial_origin = Vector2Add(vec1, initial_origin);
+        phasor = coefficients[i_negative];
+        x = creal(phasor) * VECTOR_SCALE;
+        y = cimag(phasor) * VECTOR_SCALE;
+        Vector2 vec2 = { x, y };
+        initial_origin = Vector2Add(vec2, initial_origin);
+    }
+
     Vector2 trail_points[TRAIL_POINT_COUNT];
-    int trail_opacities[TRAIL_POINT_COUNT];
-    memset(trail_points, 0, sizeof(trail_points));
-    memset(trail_opacities, 0, sizeof(trail_opacities));
+    for (int i = 0; i < TRAIL_POINT_COUNT; i++) {
+        trail_points[i] = initial_origin;
+    }
 
     int current_trail_point = 0;
 
@@ -110,73 +180,86 @@ int main() {
 
     float t = 0;
     float trail_accumulator = 0;
-    float fade_accumulator = 0;
     while (!WindowShouldClose()) {
         float dt = GetFrameTime();
-        t += dt / 20;
-        trail_accumulator += dt;
-        fade_accumulator += dt;
+        t += dt / DRAW_TIME;
+        trail_accumulator += dt / DRAW_TIME;
 
         BeginDrawing();
 
         ClearBackground(BLACK);
-
-        for (int i = 0; i < TRAIL_POINT_COUNT; i++) {
-            DrawCircleV(trail_points[i], 5, (Color){ 255, 0, 0, trail_opacities[i] });
-        }
 
         Vector2 current_origin = origin;
         complex phasor = coefficients[COEFFICIENTS];
         float x = creal(phasor) * VECTOR_SCALE;
         float y = cimag(phasor) * VECTOR_SCALE;
         Vector2 vec = { x, y };
-        float width = 10;
-        DrawVector(vec, current_origin, width);
+        float vector_width = 4;
+        float ring_width = 1.5;
+        // Do I want to draw the vector with f = 0?
+        // DrawVector(vec, current_origin, vector_width);
         float radius = sqrtf(x*x + y*y);
-        DrawRing(current_origin, radius, radius - 5, 0, 360, 100, BLUE);
+        // DrawRing(current_origin, radius, radius - ring_width, 0, 360, 100, TRANS_GRAY);
         current_origin = Vector2Add(vec, current_origin);
 
         for (int k = 1; k <= COEFFICIENTS; k++) {
             int i_positive = k + COEFFICIENTS;
             int i_negative = -k + COEFFICIENTS;
-            width *= 0.9f;
-            
-            phasor = coefficients[i_positive] * (cos(PI * k * t) + I * sin(PI * k * t));
+            vector_width *= 0.9f;
+            // ring_width *= 0.8f;
+            if (vector_width <= 0.5f) vector_width = 0.5f;
+            // if (ring_width <= 0.5f) ring_width = 0.5f;
+
+            phasor = coefficients[i_positive] * (cos(2 * PI * k * t) + I * sin(2 * PI * k * t));
             x = creal(phasor) * VECTOR_SCALE;
             y = cimag(phasor) * VECTOR_SCALE;
             Vector2 vec1 = { x, y };
-            DrawVector(vec1, current_origin, width);
+            DrawVector(vec1, current_origin, vector_width);
             radius = sqrtf(x*x + y*y);
-            DrawRing(current_origin, radius, radius - 5, 0, 360, 100, BLUE);
+            DrawRing(current_origin, radius, radius - ring_width, 0, 360, 100, TRANS_GRAY);
             current_origin = Vector2Add(vec1, current_origin);
 
-            phasor = coefficients[i_negative] * (cos(PI * -k * t) + I * sin(PI * -k * t));
+            phasor = coefficients[i_negative] * (cos(2 * PI * -k * t) + I * sin(2 * PI * -k * t));
             x = creal(phasor) * VECTOR_SCALE;
             y = cimag(phasor) * VECTOR_SCALE;
             Vector2 vec2 = { x, y };
-            DrawVector(vec2, current_origin, width);
+            DrawVector(vec2, current_origin, vector_width);
             radius = sqrtf(x*x + y*y);
-            DrawRing(current_origin, radius, radius - 5, 0, 360, 100, BLUE);
+            DrawRing(current_origin, radius, radius - ring_width, 0, 360, 100, TRANS_GRAY);
             current_origin = Vector2Add(vec2, current_origin);
         }
 
-        if (trail_accumulator >= 0.01f) {
+        while (trail_accumulator >= (float)1 / TRAIL_POINT_COUNT) {
             trail_points[current_trail_point] = current_origin;
-            trail_opacities[current_trail_point] = 255;
             current_trail_point++;
             if (current_trail_point >= TRAIL_POINT_COUNT) current_trail_point = 0;
-            trail_accumulator = 0;
+            trail_accumulator -= (float)1 / TRAIL_POINT_COUNT;
         }
 
-        if (fade_accumulator >= 0.00784313725) {
-            for (int i = 0; i < TRAIL_POINT_COUNT; i++) {
-                trail_opacities[i] -= 1;
-                if (trail_opacities[i] < 0) trail_opacities[i] = 0;
+        /*for (int i = 0; i < TRAIL_POINT_COUNT; i++) {
+            DrawCircleV(trail_points[i], 5, (Color){ 255, 0, 0, 255 });
+        }*/
+
+        int i = current_trail_point;
+        int last_i = i - 1;
+        if (last_i < 0) last_i = TRAIL_POINT_COUNT - 1;
+        while (i != last_i) {
+            int next_i = i + 1;
+            if (next_i >= TRAIL_POINT_COUNT) next_i = 0;
+
+            int distance_from_start;
+            if (i > last_i) {
+                distance_from_start = i - current_trail_point;
+            } else {
+                distance_from_start = i + (TRAIL_POINT_COUNT - current_trail_point);
             }
-            fade_accumulator = 0;
+            int alpha = (float)distance_from_start / TRAIL_POINT_COUNT * 255;
+
+            DrawLineEx(trail_points[i], trail_points[next_i], 3, (Color){ 253, 249, 0, alpha });
+            i = next_i;
         }
 
-        // DrawSplineBezierCubic(points, npts, 3, WHITE);
+        // DrawSplineBezierCubic(points, npts, 4, WHITE);
 
         EndDrawing();
     }
